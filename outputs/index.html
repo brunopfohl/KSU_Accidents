@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Liberec Accident Analysis</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+
+        #map { position: absolute; top: 0; left: 0; right: 360px; bottom: 0; }
+
+        #sidebar {
+            position: absolute; top: 0; right: 0; width: 360px; height: 100%;
+            background: #1a1a2e; color: #eee; overflow-y: auto;
+            box-shadow: -2px 0 10px rgba(0,0,0,0.3);
+        }
+
+        .header {
+            background: linear-gradient(135deg, #16213e 0%, #1a1a2e 100%);
+            padding: 16px 20px; border-bottom: 1px solid #333;
+        }
+        .header h1 { font-size: 16px; margin-bottom: 4px; }
+        .header p { font-size: 11px; color: #888; }
+
+        .section { padding: 12px 16px; border-bottom: 1px solid #333; }
+        .section h2 {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+            color: #888; margin-bottom: 10px;
+        }
+
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+        .stat-box {
+            background: #16213e; padding: 8px; border-radius: 6px; text-align: center;
+        }
+        .stat-box.day { border-left: 3px solid #ff8c00; }
+        .stat-box.night { border-left: 3px solid #6a5acd; }
+        .stat-value { font-size: 18px; font-weight: bold; }
+        .stat-label { font-size: 9px; color: #888; margin-top: 2px; }
+
+        .control-group { margin-bottom: 12px; }
+        .control-group label { display: block; margin-bottom: 4px; font-size: 11px; color: #ccc; }
+        .control-group input[type="range"] { width: 100%; cursor: pointer; }
+        .control-group input[type="number"],
+        .control-group select {
+            width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #333;
+            background: #16213e; color: #eee; font-size: 12px; cursor: pointer;
+        }
+        .control-value {
+            text-align: center; margin-top: 4px; color: #ff8c00; font-size: 12px; font-weight: bold;
+        }
+
+        /* Multi-select dropdown */
+        .multiselect { position: relative; }
+        .multiselect-btn {
+            width: 100%; padding: 8px 12px; border-radius: 4px; border: 1px solid #333;
+            background: #16213e; color: #eee; font-size: 12px; cursor: pointer;
+            text-align: left; display: flex; justify-content: space-between; align-items: center;
+        }
+        .multiselect-btn::after { content: '▼'; font-size: 10px; color: #888; }
+        .multiselect-dropdown {
+            display: none; position: absolute; top: 100%; left: 0; right: 0;
+            background: #16213e; border: 1px solid #333; border-radius: 4px;
+            max-height: 200px; overflow-y: auto; z-index: 100;
+            margin-top: 2px;
+        }
+        .multiselect-dropdown.open { display: block; }
+        .multiselect-option {
+            padding: 8px 12px; cursor: pointer; font-size: 11px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .multiselect-option:hover { background: #2a3a5e; }
+        .multiselect-option input { cursor: pointer; }
+        .multiselect-count { color: #888; font-size: 10px; margin-left: auto; }
+        .selected-count {
+            background: #ff8c00; color: #000; padding: 2px 6px;
+            border-radius: 10px; font-size: 10px; font-weight: bold;
+        }
+
+        .layer-toggle {
+            display: flex; align-items: center; padding: 6px 0; cursor: pointer;
+        }
+        .layer-toggle input { margin-right: 8px; width: 14px; height: 14px; cursor: pointer; }
+        .layer-toggle label { flex: 1; cursor: pointer; font-size: 12px; }
+        .dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            display: inline-block; margin-right: 6px;
+        }
+        .dot.day { background: #ff8c00; }
+        .dot.night { background: #6a5acd; }
+        .dot.day-cluster { background: #ffa500; border: 2px solid #fff; }
+        .dot.night-cluster { background: #483d8b; border: 2px solid #fff; }
+
+        .cluster-list { max-height: 200px; overflow-y: auto; }
+        .cluster-item {
+            background: #16213e; padding: 8px 10px; border-radius: 6px;
+            margin-bottom: 5px; cursor: pointer; transition: background 0.2s;
+        }
+        .cluster-item:hover { background: #1f2b47; }
+        .cluster-item.day { border-left: 3px solid #ff8c00; }
+        .cluster-item.night { border-left: 3px solid #6a5acd; }
+        .cluster-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; }
+        .cluster-count { font-size: 14px; font-weight: bold; }
+        .cluster-damage { font-size: 10px; color: #4ade80; }
+        .cluster-badge {
+            font-size: 8px; padding: 2px 4px; border-radius: 3px; text-transform: uppercase;
+        }
+        .cluster-badge.day { background: #ff8c00; color: #000; }
+        .cluster-badge.night { background: #6a5acd; color: #fff; }
+        .cluster-cause {
+            font-size: 10px; color: #aaa;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+
+        .loading {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9); padding: 20px 40px; border-radius: 10px;
+            color: #fff; z-index: 9999;
+        }
+
+        .computing {
+            position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(255,140,0,0.9); padding: 8px 20px; border-radius: 20px;
+            color: #000; font-size: 12px; font-weight: bold; z-index: 999;
+            display: none;
+        }
+
+        .leaflet-popup-content { font-size: 12px; line-height: 1.4; }
+        .popup-title { font-weight: bold; font-size: 13px; margin-bottom: 6px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+        .popup-row { display: flex; justify-content: space-between; margin: 2px 0; }
+        .popup-label { color: #666; }
+        .popup-value { font-weight: 500; }
+        .popup-severity { margin-top: 6px; padding-top: 6px; border-top: 1px solid #eee; }
+        .popup-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-right: 4px; }
+        .popup-badge.fatal { background: #dc2626; color: #fff; }
+        .popup-badge.serious { background: #f97316; color: #fff; }
+        .popup-badge.minor { background: #eab308; color: #000; }
+
+        @media (max-width: 800px) {
+            #map { right: 0; bottom: 50%; }
+            #sidebar { top: 50%; width: 100%; height: 50%; }
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div class="computing" id="computing">Computing clusters...</div>
+    <div id="sidebar">
+        <div class="header">
+            <h1>Accident Hotspot Analysis</h1>
+            <p>Liberec Region - Live DBSCAN Clustering</p>
+        </div>
+
+        <div class="section">
+            <h2>Statistics</h2>
+            <div style="font-size: 10px; color: #888; margin-bottom: 8px;">
+                Day: 06:00–18:59 · Night: 19:00–05:59
+            </div>
+            <div class="stats-grid">
+                <div class="stat-box day">
+                    <div class="stat-value" id="day-accidents">-</div>
+                    <div class="stat-label">Day Accidents</div>
+                </div>
+                <div class="stat-box night">
+                    <div class="stat-value" id="night-accidents">-</div>
+                    <div class="stat-label">Night Accidents</div>
+                </div>
+                <div class="stat-box day">
+                    <div class="stat-value" id="day-clusters">-</div>
+                    <div class="stat-label">Day Hotspots</div>
+                </div>
+                <div class="stat-box night">
+                    <div class="stat-value" id="night-clusters">-</div>
+                    <div class="stat-label">Night Hotspots</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Accident Filters</h2>
+            <div class="control-group">
+                <label>Minimum Severity</label>
+                <select id="severity-filter">
+                    <option value="all">All Accidents</option>
+                    <option value="injury">With Any Injury</option>
+                    <option value="serious">Serious+ (Serious or Fatal)</option>
+                    <option value="fatal">Fatal Only</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Accident Type</label>
+                <div class="multiselect" id="type-multiselect">
+                    <button class="multiselect-btn" id="type-btn">
+                        <span id="type-label">All Types</span>
+                    </button>
+                    <div class="multiselect-dropdown" id="type-dropdown"></div>
+                </div>
+            </div>
+            <div class="control-group">
+                <label>Min Damage per Accident (Kč)</label>
+                <input type="number" id="min-damage-accident" value="0" min="0" step="10000" placeholder="0">
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Clustering Settings</h2>
+            <div class="control-group">
+                <label>Cluster Distance (eps)</label>
+                <input type="range" id="eps-slider" min="50" max="1000" value="200" step="10">
+                <div class="control-value"><span id="eps-value">200</span>m</div>
+            </div>
+            <div class="control-group">
+                <label>Min Points per Cluster</label>
+                <input type="number" id="min-samples" min="2" max="10000" value="3">
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Display Filters</h2>
+            <div class="control-group">
+                <label>Min Accidents per Hotspot</label>
+                <input type="range" id="min-display" min="3" max="50" value="5">
+                <div class="control-value"><span id="min-display-value">5</span>+</div>
+            </div>
+            <div class="control-group">
+                <label>Min Damage per Hotspot (Kč)</label>
+                <input type="number" id="min-damage-cluster" value="0" min="0" step="50000" placeholder="0">
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Layers</h2>
+            <div class="layer-toggle">
+                <input type="checkbox" id="show-day-accidents" checked>
+                <label for="show-day-accidents"><span class="dot day"></span>Day Accidents</label>
+            </div>
+            <div class="layer-toggle">
+                <input type="checkbox" id="show-night-accidents" checked>
+                <label for="show-night-accidents"><span class="dot night"></span>Night Accidents</label>
+            </div>
+            <div class="layer-toggle">
+                <input type="checkbox" id="show-day-clusters" checked>
+                <label for="show-day-clusters"><span class="dot day-cluster"></span>Day Hotspots</label>
+            </div>
+            <div class="layer-toggle">
+                <input type="checkbox" id="show-night-clusters" checked>
+                <label for="show-night-clusters"><span class="dot night-cluster"></span>Night Hotspots</label>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Top Hotspots</h2>
+            <div class="cluster-list" id="cluster-list"></div>
+        </div>
+    </div>
+
+    <div class="loading" id="loading">Loading data...</div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        let map, dayAccidentsLayer, nightAccidentsLayer, dayClustersLayer, nightClustersLayer;
+        let dayAccidents, nightAccidents;
+        let currentClusters = { day: [], night: [] };
+        let updateTimeout = null;
+        let allTypes = [];
+        let selectedTypes = new Set();
+
+        function formatMoney(val) {
+            return val.toLocaleString('cs-CZ') + ' Kč';
+        }
+
+        function formatDate(isoStr) {
+            if (!isoStr) return 'N/A';
+            return new Date(isoStr).toLocaleString('cs-CZ');
+        }
+
+        function createAccidentPopup(props, period) {
+            const badges = [];
+            if (props.usmrceno > 0) badges.push(`<span class="popup-badge fatal">${props.usmrceno} fatal</span>`);
+            if (props.tezce_zraneno > 0) badges.push(`<span class="popup-badge serious">${props.tezce_zraneno} serious</span>`);
+            if (props.lehce_zraneno > 0) badges.push(`<span class="popup-badge minor">${props.lehce_zraneno} minor</span>`);
+
+            return `
+                <div class="popup-title">${period} Accident</div>
+                <div class="popup-row"><span class="popup-label">Time:</span> <span class="popup-value">${formatDate(props.datetime)}</span></div>
+                <div class="popup-row"><span class="popup-label">Type:</span> <span class="popup-value">${props.druh || 'N/A'}</span></div>
+                <div class="popup-row"><span class="popup-label">Cause:</span> <span class="popup-value">${props.pricina || 'N/A'}</span></div>
+                <div class="popup-row"><span class="popup-label">Damage:</span> <span class="popup-value">${formatMoney(props.hmotna_skoda)}</span></div>
+                ${badges.length ? `<div class="popup-severity">${badges.join('')}</div>` : ''}
+            `;
+        }
+
+        function createClusterPopup(c, period) {
+            return `
+                <div class="popup-title">${period} Hotspot</div>
+                <div class="popup-row"><span class="popup-label">Accidents:</span> <span class="popup-value">${c.count}</span></div>
+                <div class="popup-row"><span class="popup-label">Total Damage:</span> <span class="popup-value">${formatMoney(c.damage)}</span></div>
+                <div class="popup-row"><span class="popup-label">Main Cause:</span> <span class="popup-value">${c.cause}</span></div>
+                <div class="popup-severity">
+                    ${c.fatalities > 0 ? `<span class="popup-badge fatal">${c.fatalities} fatal</span>` : ''}
+                    ${c.serious > 0 ? `<span class="popup-badge serious">${c.serious} serious</span>` : ''}
+                    ${c.minor > 0 ? `<span class="popup-badge minor">${c.minor} minor</span>` : ''}
+                </div>
+            `;
+        }
+
+        function getFilterParams() {
+            const params = new URLSearchParams();
+            params.set('severity', document.getElementById('severity-filter').value);
+
+            const minDmg = parseInt(document.getElementById('min-damage-accident').value) || 0;
+            if (minDmg > 0) params.set('min_damage', minDmg);
+
+            if (selectedTypes.size > 0 && selectedTypes.size < allTypes.length) {
+                params.set('types', Array.from(selectedTypes).join('|'));
+            }
+
+            return params.toString();
+        }
+
+        function initTypeMultiselect(types) {
+            allTypes = types;
+            const dropdown = document.getElementById('type-dropdown');
+
+            dropdown.innerHTML = types.map(t => `
+                <label class="multiselect-option">
+                    <input type="checkbox" value="${t.name}" checked>
+                    <span>${t.name}</span>
+                    <span class="multiselect-count">${t.count}</span>
+                </label>
+            `).join('');
+
+            // Initialize all selected
+            selectedTypes = new Set(types.map(t => t.name));
+            updateTypeLabel();
+
+            // Toggle dropdown
+            document.getElementById('type-btn').addEventListener('click', (e) => {
+                e.stopPropagation();
+                dropdown.classList.toggle('open');
+            });
+
+            // Close on outside click
+            document.addEventListener('click', () => dropdown.classList.remove('open'));
+            dropdown.addEventListener('click', e => e.stopPropagation());
+
+            // Handle checkbox changes
+            dropdown.querySelectorAll('input').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    if (cb.checked) {
+                        selectedTypes.add(cb.value);
+                    } else {
+                        selectedTypes.delete(cb.value);
+                    }
+                    updateTypeLabel();
+                    debouncedUpdate(true);
+                });
+            });
+        }
+
+        function updateTypeLabel() {
+            const label = document.getElementById('type-label');
+            if (selectedTypes.size === 0) {
+                label.innerHTML = '<span style="color:#f87171">No types selected</span>';
+            } else if (selectedTypes.size === allTypes.length) {
+                label.textContent = 'All Types';
+            } else {
+                label.innerHTML = `<span class="selected-count">${selectedTypes.size}</span> types selected`;
+            }
+        }
+
+        async function init() {
+            const stats = await fetch('/api/stats').then(r => r.json());
+
+            map = L.map('map').setView([stats.center_lat, stats.center_lon], 10);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+                attribution: '© OSM © CARTO', subdomains: 'abcd', maxZoom: 19
+            }).addTo(map);
+
+            dayAccidentsLayer = L.layerGroup().addTo(map);
+            nightAccidentsLayer = L.layerGroup().addTo(map);
+            dayClustersLayer = L.layerGroup().addTo(map);
+            nightClustersLayer = L.layerGroup().addTo(map);
+
+            initTypeMultiselect(stats.types);
+
+            await fetchAccidents();
+            await fetchClusters();
+
+            document.getElementById('loading').style.display = 'none';
+            setupEventListeners();
+        }
+
+        async function fetchAccidents() {
+            const filterParams = getFilterParams();
+            const url = '/api/accidents' + (filterParams ? '?' + filterParams : '');
+
+            const result = await fetch(url).then(r => r.json());
+            dayAccidents = result.day;
+            nightAccidents = result.night;
+
+            document.getElementById('day-accidents').textContent = result.day_count.toLocaleString();
+            document.getElementById('night-accidents').textContent = result.night_count.toLocaleString();
+
+            renderAccidents();
+        }
+
+        function renderAccidents() {
+            dayAccidentsLayer.clearLayers();
+            nightAccidentsLayer.clearLayers();
+
+            dayAccidents.features.forEach(f => {
+                const p = f.properties;
+                let color = '#ff8c00';
+                if (p.usmrceno > 0) color = '#dc2626';
+                else if (p.tezce_zraneno > 0) color = '#f97316';
+
+                L.circleMarker([f.geometry.coordinates[1], f.geometry.coordinates[0]], {
+                    radius: p.usmrceno > 0 ? 6 : 4,
+                    color: color, fillColor: color, fillOpacity: 0.7, weight: 1
+                }).bindPopup(createAccidentPopup(p, 'Day'))
+                .addTo(dayAccidentsLayer);
+            });
+
+            nightAccidents.features.forEach(f => {
+                const p = f.properties;
+                let color = '#6a5acd';
+                if (p.usmrceno > 0) color = '#dc2626';
+                else if (p.tezce_zraneno > 0) color = '#f97316';
+
+                L.circleMarker([f.geometry.coordinates[1], f.geometry.coordinates[0]], {
+                    radius: p.usmrceno > 0 ? 6 : 4,
+                    color: color, fillColor: color, fillOpacity: 0.7, weight: 1
+                }).bindPopup(createAccidentPopup(p, 'Night'))
+                .addTo(nightAccidentsLayer);
+            });
+        }
+
+        async function fetchClusters() {
+            const eps = document.getElementById('eps-slider').value / 1000;
+            const minSamples = document.getElementById('min-samples').value;
+            const filterParams = getFilterParams();
+
+            document.getElementById('computing').style.display = 'block';
+
+            try {
+                let url = `/api/cluster?eps=${eps}&min_samples=${minSamples}`;
+                if (filterParams) url += '&' + filterParams;
+
+                const result = await fetch(url).then(r => r.json());
+                currentClusters = { day: result.day, night: result.night };
+                renderClusters();
+            } catch (err) {
+                console.error('Cluster error:', err);
+            }
+
+            document.getElementById('computing').style.display = 'none';
+        }
+
+        function renderClusters() {
+            const minDisplay = parseInt(document.getElementById('min-display').value);
+            const minDamageCluster = parseInt(document.getElementById('min-damage-cluster').value) || 0;
+
+            dayClustersLayer.clearLayers();
+            nightClustersLayer.clearLayers();
+
+            let dayCount = 0, nightCount = 0;
+            const filterCluster = c => c.count >= minDisplay && c.damage >= minDamageCluster;
+
+            currentClusters.day.filter(filterCluster).forEach(c => {
+                dayCount++;
+                const radius = Math.min(8 + Math.sqrt(c.count) * 1.5, 22);
+                let color = '#ffa500';
+                if (c.fatalities > 0) color = '#dc2626';
+                else if (c.serious > 0) color = '#f97316';
+
+                L.circleMarker([c.lat, c.lon], {
+                    radius, color: '#fff', fillColor: color, fillOpacity: 0.9, weight: 2
+                }).bindPopup(createClusterPopup(c, 'Day')).addTo(dayClustersLayer);
+            });
+
+            currentClusters.night.filter(filterCluster).forEach(c => {
+                nightCount++;
+                const radius = Math.min(8 + Math.sqrt(c.count) * 1.5, 22);
+                let color = '#483d8b';
+                if (c.fatalities > 0) color = '#dc2626';
+                else if (c.serious > 0) color = '#f97316';
+
+                L.circleMarker([c.lat, c.lon], {
+                    radius, color: '#fff', fillColor: color, fillOpacity: 0.9, weight: 2
+                }).bindPopup(createClusterPopup(c, 'Night')).addTo(nightClustersLayer);
+            });
+
+            document.getElementById('day-clusters').textContent = dayCount;
+            document.getElementById('night-clusters').textContent = nightCount;
+
+            updateClusterList(minDisplay, minDamageCluster);
+        }
+
+        function updateClusterList(minDisplay, minDamageCluster) {
+            const filterCluster = c => c.count >= minDisplay && c.damage >= minDamageCluster;
+
+            const all = [
+                ...currentClusters.day.filter(filterCluster).map(c => ({...c, period: 'Day'})),
+                ...currentClusters.night.filter(filterCluster).map(c => ({...c, period: 'Night'}))
+            ].sort((a, b) => b.count - a.count).slice(0, 15);
+
+            document.getElementById('cluster-list').innerHTML = all.map(c => `
+                <div class="cluster-item ${c.period.toLowerCase()}" onclick="map.flyTo([${c.lat}, ${c.lon}], 15)">
+                    <div class="cluster-header">
+                        <span class="cluster-count">${c.count} accidents</span>
+                        <span class="cluster-badge ${c.period.toLowerCase()}">${c.period}</span>
+                    </div>
+                    <div class="cluster-damage">${formatMoney(c.damage)}</div>
+                    <div class="cluster-cause" title="${c.cause}">${c.cause}</div>
+                </div>
+            `).join('');
+        }
+
+        function debouncedUpdate(fetchData = false) {
+            clearTimeout(updateTimeout);
+            updateTimeout = setTimeout(async () => {
+                if (fetchData) await fetchAccidents();
+                await fetchClusters();
+            }, 300);
+        }
+
+        function setupEventListeners() {
+            // Cluster params
+            document.getElementById('eps-slider').addEventListener('input', function() {
+                document.getElementById('eps-value').textContent = this.value;
+                debouncedUpdate();
+            });
+            document.getElementById('min-samples').addEventListener('change', () => debouncedUpdate());
+
+            // Accident filters
+            document.getElementById('severity-filter').addEventListener('change', () => debouncedUpdate(true));
+            document.getElementById('min-damage-accident').addEventListener('change', () => debouncedUpdate(true));
+
+            // Display filters
+            document.getElementById('min-display').addEventListener('input', function() {
+                document.getElementById('min-display-value').textContent = this.value;
+                renderClusters();
+            });
+            document.getElementById('min-damage-cluster').addEventListener('change', renderClusters);
+
+            // Layer toggles
+            document.getElementById('show-day-accidents').addEventListener('change', function() {
+                this.checked ? map.addLayer(dayAccidentsLayer) : map.removeLayer(dayAccidentsLayer);
+            });
+            document.getElementById('show-night-accidents').addEventListener('change', function() {
+                this.checked ? map.addLayer(nightAccidentsLayer) : map.removeLayer(nightAccidentsLayer);
+            });
+            document.getElementById('show-day-clusters').addEventListener('change', function() {
+                this.checked ? map.addLayer(dayClustersLayer) : map.removeLayer(dayClustersLayer);
+            });
+            document.getElementById('show-night-clusters').addEventListener('change', function() {
+                this.checked ? map.addLayer(nightClustersLayer) : map.removeLayer(nightClustersLayer);
+            });
+        }
+
+        init();
+    </script>
+</body>
+</html>
