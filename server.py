@@ -1,20 +1,30 @@
 """
-Flask server for on-the-fly DBSCAN clustering.
+Flask server for traffic accident hotspot analysis.
+Supports both DBSCAN clustering and Getis-Ord Gi* statistical hotspot detection.
 """
 
 import json
-import os
 import re
+import warnings
 from collections import Counter
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+import numpy as np
 import pandas as pd
 from sklearn.cluster import DBSCAN
+import geopandas as gpd
+from shapely.geometry import Point, box
+from libpysal.weights import KNN
+from esda.getisord import G_Local
+from scipy import stats
+
+warnings.filterwarnings('ignore')
 
 app = Flask(__name__, static_folder='outputs')
 CORS(app)
 
 DATA = None
+GRID_CACHE = {}
 
 
 def parse_damage(value):
@@ -63,13 +73,23 @@ def load_data():
     df['datetime'] = df['datetime'].dt.tz_convert('Europe/Prague')
     df['hour'] = df['datetime'].dt.hour
     df['period'] = df['hour'].apply(lambda h: 'Day' if 6 <= h <= 18 else 'Night')
+    df['severity_score'] = df['usmrceno'] * 100 + df['tezce_zraneno'] * 10 + df['lehce_zraneno']
+
+    # Create GeoDataFrame for spatial analysis
+    geometry = [Point(xy) for xy in zip(df['longitude'], df['latitude'])]
+    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
+    bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
 
     DATA = {
         'df': df,
+        'gdf': gdf,
         'day_df': df[df['period'] == 'Day'],
         'night_df': df[df['period'] == 'Night'],
+        'day_gdf': gdf[gdf['period'] == 'Day'].copy(),
+        'night_gdf': gdf[gdf['period'] == 'Night'].copy(),
         'center_lat': df['latitude'].mean(),
-        'center_lon': df['longitude'].mean()
+        'center_lon': df['longitude'].mean(),
+        'bounds': bounds
     }
     print(f"Loaded {len(df)} records (Day: {len(DATA['day_df'])}, Night: {len(DATA['night_df'])})")
     return DATA
@@ -138,6 +158,187 @@ def filter_dataframe(df, filters):
     return result
 
 
+# =============================================================================
+# Getis-Ord Gi* Functions
+# =============================================================================
+
+def create_grid(bounds, cell_size_m=200):
+    """Create a grid of cells covering the study area (vectorized)."""
+    minx, miny, maxx, maxy = bounds
+    cell_size_deg = cell_size_m / 111000  # 1 degree ≈ 111km
+
+    # Create coordinate arrays
+    x_edges = np.arange(minx, maxx + cell_size_deg, cell_size_deg)
+    y_edges = np.arange(miny, maxy + cell_size_deg, cell_size_deg)
+    num_cols = len(x_edges) - 1
+    num_rows = len(y_edges) - 1
+
+    # Create cell centers using meshgrid (vectorized)
+    x_centers = x_edges[:-1] + cell_size_deg / 2
+    y_centers = y_edges[:-1] + cell_size_deg / 2
+    xx, yy = np.meshgrid(x_centers, y_centers)
+
+    # Flatten to 1D arrays
+    center_lons = xx.flatten()
+    center_lats = yy.flatten()
+    cell_ids = np.arange(len(center_lons))
+
+    # Create point geometries for KNN (faster than boxes, works for spatial weights)
+    geometries = gpd.points_from_xy(center_lons, center_lats)
+
+    return gpd.GeoDataFrame({
+        'cell_id': cell_ids,
+        'center_lon': center_lons,
+        'center_lat': center_lats,
+        'geometry': geometries
+    }, crs="EPSG:4326")
+
+
+def aggregate_to_grid(gdf, grid, bounds, cell_size_m):
+    """Count accidents per grid cell using fast vectorized calculation."""
+    grid = grid.copy()
+
+    # Initialize columns
+    grid['count'] = 0
+    grid['usmrceno'] = 0
+    grid['tezce_zraneno'] = 0
+    grid['lehce_zraneno'] = 0
+    grid['hmotna_skoda'] = 0
+    grid['severity_score'] = 0
+    grid['dominant_cause'] = None
+
+    if len(gdf) == 0:
+        return grid
+
+    # Calculate cell size and grid dimensions
+    minx, miny, maxx, maxy = bounds
+    cell_size_deg = cell_size_m / 111000
+    num_cols = int(np.ceil((maxx - minx) / cell_size_deg))
+
+    # Fast vectorized cell assignment (no geometry operations)
+    lons = gdf['longitude'].values
+    lats = gdf['latitude'].values
+    col_idx = ((lons - minx) / cell_size_deg).astype(int)
+    row_idx = ((lats - miny) / cell_size_deg).astype(int)
+    cell_ids = row_idx * num_cols + col_idx
+
+    # Add cell_id to gdf for groupby
+    gdf = gdf.copy()
+    gdf['cell_id'] = cell_ids
+
+    # Aggregate
+    agg = gdf.groupby('cell_id').agg({
+        'longitude': 'count',  # count rows
+        'usmrceno': 'sum',
+        'tezce_zraneno': 'sum',
+        'lehce_zraneno': 'sum',
+        'hmotna_skoda': 'sum',
+        'severity_score': 'sum',
+        'pricina': lambda x: Counter(x.dropna()).most_common(1)[0][0] if len(x.dropna()) > 0 else None
+    }).rename(columns={'longitude': 'count', 'pricina': 'dominant_cause'})
+
+    # Update grid with aggregated values
+    for col in ['count', 'usmrceno', 'tezce_zraneno', 'lehce_zraneno', 'hmotna_skoda', 'severity_score']:
+        grid.loc[agg.index, col] = agg[col].astype(int)
+    grid.loc[agg.index, 'dominant_cause'] = agg['dominant_cause']
+
+    return grid
+
+
+def compute_getis_ord(grid_with_counts, value_column='count'):
+    """Compute Getis-Ord Gi* statistics for the grid (optimized)."""
+    # Initialize defaults
+    grid_with_counts['z_score'] = 0.0
+    grid_with_counts['p_value'] = 1.0
+    grid_with_counts['significant'] = False
+
+    # Only compute on cells with accidents
+    mask = grid_with_counts['count'] > 0
+    non_empty = grid_with_counts[mask].copy()
+
+    if len(non_empty) < 10:
+        return grid_with_counts
+
+    try:
+        values = non_empty[value_column].values
+        k = min(5, len(non_empty) - 1)
+        w = KNN.from_dataframe(non_empty, k=k)
+        w.transform = 'r'
+
+        # Analytical p-values (permutations=0) - fast and academically standard
+        gi = G_Local(values, w, star=True, permutations=0)
+
+        # Directly assign to masked rows
+        grid_with_counts.loc[mask, 'z_score'] = gi.Zs
+        grid_with_counts.loc[mask, 'p_value'] = gi.p_norm  # analytical p-value
+        grid_with_counts.loc[mask, 'significant'] = gi.p_norm < 0.05
+
+    except Exception as e:
+        print(f"Getis-Ord error: {e}")
+
+    return grid_with_counts
+
+
+def compare_day_night(day_grid, night_grid, total_day, total_night):
+    """Compare day vs night using binomial test. Find statistically significant anomalies."""
+    if total_day + total_night == 0:
+        return []
+
+    expected_night_ratio = total_night / (total_day + total_night)
+    results = []
+
+    for idx in day_grid.index:
+        day_count = int(day_grid.loc[idx, 'count'])
+        night_count = int(night_grid.loc[idx, 'count'])
+        total = day_count + night_count
+
+        if total < 5:
+            continue
+
+        observed_night_ratio = night_count / total
+        p_value = stats.binomtest(night_count, total, expected_night_ratio).pvalue
+
+        if p_value < 0.05:
+            results.append({
+                'cell_id': int(idx),
+                'lat': float(day_grid.loc[idx, 'center_lat']),
+                'lon': float(day_grid.loc[idx, 'center_lon']),
+                'day_count': day_count,
+                'night_count': night_count,
+                'total': total,
+                'observed_night_ratio': round(observed_night_ratio, 3),
+                'expected_night_ratio': round(expected_night_ratio, 3),
+                'p_value': round(p_value, 4),
+                'type': 'night_anomaly' if observed_night_ratio > expected_night_ratio else 'day_anomaly',
+                'dominant_cause_day': day_grid.loc[idx, 'dominant_cause'],
+                'dominant_cause_night': night_grid.loc[idx, 'dominant_cause']
+            })
+
+    return sorted(results, key=lambda x: x['p_value'])
+
+
+def filter_geodataframe(gdf, filters):
+    """Apply filters to geodataframe."""
+    result = gdf.copy()
+
+    severity = filters.get('severity', 'all')
+    if severity == 'fatal':
+        result = result[result['usmrceno'] > 0]
+    elif severity == 'serious':
+        result = result[(result['usmrceno'] > 0) | (result['tezce_zraneno'] > 0)]
+    elif severity == 'injury':
+        result = result[(result['usmrceno'] > 0) | (result['tezce_zraneno'] > 0) | (result['lehce_zraneno'] > 0)]
+
+    if filters.get('min_damage', 0) > 0:
+        result = result[result['hmotna_skoda'] >= filters['min_damage']]
+
+    types = filters.get('types', [])
+    if types:
+        result = result[result['druh'].isin(types)]
+
+    return result
+
+
 @app.route('/')
 def index():
     return send_from_directory('outputs', 'index.html')
@@ -187,6 +388,74 @@ def api_cluster():
         'night_count': len(night_clusters),
         'day_points': len(day_df),
         'night_points': len(night_df)
+    })
+
+
+@app.route('/api/hotspots')
+def api_hotspots():
+    """Compute Getis-Ord Gi* hotspots with statistical significance."""
+    data = load_data()
+
+    cell_size = int(request.args.get('cell_size', 300))
+    cell_size = max(100, min(1000, cell_size))
+    filters = get_filters_from_request()
+
+    # Filter data
+    day_gdf = filter_geodataframe(data['day_gdf'], filters)
+    night_gdf = filter_geodataframe(data['night_gdf'], filters)
+
+    # Create or get cached grid
+    cache_key = f"{cell_size}"
+    if cache_key not in GRID_CACHE:
+        GRID_CACHE[cache_key] = create_grid(data['bounds'], cell_size)
+    grid = GRID_CACHE[cache_key].copy()
+
+    # Aggregate accidents to grid
+    day_grid = aggregate_to_grid(day_gdf, grid.copy(), data['bounds'], cell_size)
+    night_grid = aggregate_to_grid(night_gdf, grid.copy(), data['bounds'], cell_size)
+
+    # Compute Getis-Ord Gi*
+    day_grid = compute_getis_ord(day_grid, 'count')
+    night_grid = compute_getis_ord(night_grid, 'count')
+
+    # Extract significant hotspots (z > 0 means hot spot, z < 0 means cold spot)
+    def extract_hotspots(grid_result, period):
+        hotspots = []
+        significant = grid_result[(grid_result['significant']) & (grid_result['z_score'] > 0)]
+        for _, row in significant.iterrows():
+            hotspots.append({
+                'lat': float(row['center_lat']),
+                'lon': float(row['center_lon']),
+                'count': int(row['count']),
+                'z_score': round(float(row['z_score']), 2),
+                'p_value': round(float(row['p_value']), 4),
+                'fatalities': int(row['usmrceno']),
+                'serious': int(row['tezce_zraneno']),
+                'minor': int(row['lehce_zraneno']),
+                'damage': int(row['hmotna_skoda']),
+                'cause': row['dominant_cause'],
+                'period': period
+            })
+        return sorted(hotspots, key=lambda x: x['z_score'], reverse=True)
+
+    day_hotspots = extract_hotspots(day_grid, 'Day')
+    night_hotspots = extract_hotspots(night_grid, 'Night')
+
+    # Compare day vs night - find anomalies
+    anomalies = compare_day_night(day_grid, night_grid, len(day_gdf), len(night_gdf))
+
+    return jsonify({
+        'cell_size': cell_size,
+        'day_hotspots': day_hotspots,
+        'night_hotspots': night_hotspots,
+        'day_hotspot_count': len(day_hotspots),
+        'night_hotspot_count': len(night_hotspots),
+        'day_accidents': len(day_gdf),
+        'night_accidents': len(night_gdf),
+        'anomalies': anomalies[:20],
+        'total_anomalies': len(anomalies),
+        'night_anomalies': len([a for a in anomalies if a['type'] == 'night_anomaly']),
+        'day_anomalies': len([a for a in anomalies if a['type'] == 'day_anomaly'])
     })
 
 
