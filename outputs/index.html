@@ -271,6 +271,14 @@
                 <strong>statistically significant</strong> (p &lt; 0.05). Also detects day/night anomalies.
             </div>
             <div class="control-group">
+                <label>Analyze by</label>
+                <select id="metric-select">
+                    <option value="count">Accident Count</option>
+                    <option value="severity_score">Severity Score</option>
+                    <option value="hmotna_skoda">Property Damage (CZK)</option>
+                </select>
+            </div>
+            <div class="control-group">
                 <label>Grid Cell Size</label>
                 <input type="range" id="cell-size" min="100" max="1000" value="300" step="50">
                 <div class="control-value"><span id="cell-size-value">300</span>m</div>
@@ -328,10 +336,17 @@
         let dayAccidents, nightAccidents;
         let currentClusters = { day: [], night: [] };
         let currentAnomalies = [];
+        let currentMetric = 'count';
         let updateTimeout = null;
         let allTypes = [];
         let selectedTypes = new Set();
         let currentMode = 'dbscan';
+
+        const metricLabels = {
+            'count': 'Accidents',
+            'severity_score': 'Severity',
+            'hmotna_skoda': 'Damage'
+        };
 
         function formatMoney(val) {
             return val.toLocaleString('cs-CZ') + ' Kc';
@@ -363,10 +378,20 @@
                 `<div class="popup-row"><span class="popup-label">Z-score:</span> <span class="popup-value">${c.z_score}</span></div>
                  <div class="popup-row"><span class="popup-label">P-value:</span> <span class="popup-value">${c.p_value}</span></div>` : '';
 
+            // Show metric-specific info for Getis-Ord
+            let metricInfo = '';
+            if (c.metric_value !== undefined && currentMetric !== 'count') {
+                const label = metricLabels[currentMetric] || currentMetric;
+                const value = currentMetric === 'hmotna_skoda' ? formatMoney(c.metric_value) : c.metric_value.toLocaleString();
+                metricInfo = `<div class="popup-row"><span class="popup-label">${label}:</span> <span class="popup-value">${value}</span></div>`;
+            }
+
             return `
                 <div class="popup-title">${period} Hotspot</div>
                 <div class="popup-row"><span class="popup-label">Accidents:</span> <span class="popup-value">${c.count}</span></div>
+                ${metricInfo}
                 <div class="popup-row"><span class="popup-label">Total Damage:</span> <span class="popup-value">${formatMoney(c.damage)}</span></div>
+                <div class="popup-row"><span class="popup-label">Severity Score:</span> <span class="popup-value">${(c.severity_score || 0).toLocaleString()}</span></div>
                 <div class="popup-row"><span class="popup-label">Main Cause:</span> <span class="popup-value">${c.cause || 'N/A'}</span></div>
                 ${zInfo}
                 <div class="popup-severity">
@@ -378,7 +403,7 @@
         }
 
         function createAnomalyPopup(a) {
-            const typeLabel = a.type === 'night_anomaly' ? 'Night Anomaly' : 'Day Anomaly';
+            const typeLabel = a.type === 'night_anomaly' ? 'Night Anomaly Cluster' : 'Day Anomaly Cluster';
             const ratio = (a.observed_night_ratio * 100).toFixed(1);
             const expected = (a.expected_night_ratio * 100).toFixed(1);
 
@@ -387,6 +412,7 @@
                 <div class="popup-row"><span class="popup-label">Day accidents:</span> <span class="popup-value">${a.day_count}</span></div>
                 <div class="popup-row"><span class="popup-label">Night accidents:</span> <span class="popup-value">${a.night_count}</span></div>
                 <div class="popup-row"><span class="popup-label">Night ratio:</span> <span class="popup-value">${ratio}% (expected ${expected}%)</span></div>
+                <div class="popup-row"><span class="popup-label">Z-score:</span> <span class="popup-value">${a.z_score}</span></div>
                 <div class="popup-row"><span class="popup-label">P-value:</span> <span class="popup-value">${a.p_value}</span></div>
                 <div class="popup-row"><span class="popup-label">Day cause:</span> <span class="popup-value">${a.dominant_cause_day || 'N/A'}</span></div>
                 <div class="popup-row"><span class="popup-label">Night cause:</span> <span class="popup-value">${a.dominant_cause_night || 'N/A'}</span></div>
@@ -575,14 +601,16 @@
 
         async function fetchGetisOrd() {
             const cellSize = document.getElementById('cell-size').value;
+            const metric = document.getElementById('metric-select').value;
             const filterParams = getFilterParams();
 
-            let url = `/api/hotspots?cell_size=${cellSize}`;
+            let url = `/api/hotspots?cell_size=${cellSize}&metric=${metric}`;
             if (filterParams) url += '&' + filterParams;
 
             const result = await fetch(url).then(r => r.json());
             currentClusters = { day: result.day_hotspots, night: result.night_hotspots };
             currentAnomalies = result.anomalies || [];
+            currentMetric = result.metric;
 
             document.getElementById('night-anomalies').textContent = result.night_anomalies || 0;
             document.getElementById('day-anomalies').textContent = result.day_anomalies || 0;
@@ -673,9 +701,9 @@
                         <div class="cluster-item ${c.type}" onclick="map.flyTo([${c.lat}, ${c.lon}], 15)">
                             <div class="cluster-header">
                                 <span class="cluster-count">${c.total} accidents</span>
-                                <span class="cluster-badge ${c.type}">${label} anomaly</span>
+                                <span class="cluster-badge ${c.type}">${label} cluster</span>
                             </div>
-                            <div class="cluster-zscore">Night: ${ratio}% (p=${c.p_value})</div>
+                            <div class="cluster-zscore">Night: ${ratio}% | z=${c.z_score} (p=${c.p_value})</div>
                             <div class="cluster-cause">${c.dominant_cause_night || c.dominant_cause_day || 'N/A'}</div>
                         </div>
                     `;
@@ -722,6 +750,7 @@
                 document.getElementById('cell-size-value').textContent = this.value;
                 debouncedUpdate();
             });
+            document.getElementById('metric-select').addEventListener('change', () => debouncedUpdate());
 
             // Accident filters
             document.getElementById('severity-filter').addEventListener('change', () => debouncedUpdate(true));

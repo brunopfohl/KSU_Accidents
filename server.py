@@ -252,8 +252,11 @@ def compute_getis_ord(grid_with_counts, value_column='count'):
     grid_with_counts['p_value'] = 1.0
     grid_with_counts['significant'] = False
 
-    # Only compute on cells with accidents
-    mask = grid_with_counts['count'] > 0
+    # Only compute on cells where the metric value > 0
+    # For count: cells with any accidents
+    # For severity: cells with actual injuries (not just property damage)
+    # For damage: cells with any damage
+    mask = grid_with_counts[value_column] > 0
     non_empty = grid_with_counts[mask].copy()
 
     if len(non_empty) < 10:
@@ -280,41 +283,73 @@ def compute_getis_ord(grid_with_counts, value_column='count'):
 
 
 def compare_day_night(day_grid, night_grid, total_day, total_night):
-    """Compare day vs night using binomial test. Find statistically significant anomalies."""
+    """
+    Compare day vs night using Getis-Ord Gi* on night ratio.
+    Finds spatial clusters where day/night pattern is anomalous.
+    """
     if total_day + total_night == 0:
         return []
 
     expected_night_ratio = total_night / (total_day + total_night)
+
+    # Merge day and night counts
+    combined = day_grid[['cell_id', 'center_lat', 'center_lon', 'geometry', 'dominant_cause']].copy()
+    combined = combined.rename(columns={'dominant_cause': 'dominant_cause_day'})
+    combined['day_count'] = day_grid['count'].values
+    combined['night_count'] = night_grid['count'].values
+    combined['total'] = combined['day_count'] + combined['night_count']
+    combined['dominant_cause_night'] = night_grid['dominant_cause'].values
+
+    # Only analyze cells with enough accidents
+    mask = combined['total'] >= 5
+    analysis_cells = combined[mask].copy()
+
+    if len(analysis_cells) < 10:
+        return []
+
+    # Calculate night ratio
+    analysis_cells['night_ratio'] = analysis_cells['night_count'] / analysis_cells['total']
+
+    # Apply Getis-Ord Gi* to night ratio
+    try:
+        k = min(5, len(analysis_cells) - 1)
+        w = KNN.from_dataframe(analysis_cells, k=k)
+        w.transform = 'r'
+
+        gi = G_Local(analysis_cells['night_ratio'].values, w, star=True, permutations=0)
+
+        analysis_cells['z_score'] = gi.Zs
+        analysis_cells['p_value'] = gi.p_norm
+    except Exception as e:
+        print(f"Getis-Ord anomaly error: {e}")
+        return []
+
+    # Extract significant anomalies (p < 0.05)
+    # High z-score = cluster of high night ratio = night anomaly
+    # Low z-score = cluster of low night ratio = day anomaly
     results = []
+    significant = analysis_cells[analysis_cells['p_value'] < 0.05]
 
-    for idx in day_grid.index:
-        day_count = int(day_grid.loc[idx, 'count'])
-        night_count = int(night_grid.loc[idx, 'count'])
-        total = day_count + night_count
+    for _, row in significant.iterrows():
+        z = row['z_score']
+        results.append({
+            'cell_id': int(row['cell_id']),
+            'lat': float(row['center_lat']),
+            'lon': float(row['center_lon']),
+            'day_count': int(row['day_count']),
+            'night_count': int(row['night_count']),
+            'total': int(row['total']),
+            'observed_night_ratio': round(float(row['night_ratio']), 3),
+            'expected_night_ratio': round(expected_night_ratio, 3),
+            'z_score': round(float(z), 2),
+            'p_value': round(float(row['p_value']), 4),
+            'type': 'night_anomaly' if z > 0 else 'day_anomaly',
+            'dominant_cause_day': row['dominant_cause_day'],
+            'dominant_cause_night': row['dominant_cause_night']
+        })
 
-        if total < 5:
-            continue
-
-        observed_night_ratio = night_count / total
-        p_value = stats.binomtest(night_count, total, expected_night_ratio).pvalue
-
-        if p_value < 0.05:
-            results.append({
-                'cell_id': int(idx),
-                'lat': float(day_grid.loc[idx, 'center_lat']),
-                'lon': float(day_grid.loc[idx, 'center_lon']),
-                'day_count': day_count,
-                'night_count': night_count,
-                'total': total,
-                'observed_night_ratio': round(observed_night_ratio, 3),
-                'expected_night_ratio': round(expected_night_ratio, 3),
-                'p_value': round(p_value, 4),
-                'type': 'night_anomaly' if observed_night_ratio > expected_night_ratio else 'day_anomaly',
-                'dominant_cause_day': day_grid.loc[idx, 'dominant_cause'],
-                'dominant_cause_night': night_grid.loc[idx, 'dominant_cause']
-            })
-
-    return sorted(results, key=lambda x: x['p_value'])
+    # Sort by absolute z-score (strongest anomalies first)
+    return sorted(results, key=lambda x: abs(x['z_score']), reverse=True)
 
 
 def filter_geodataframe(gdf, filters):
@@ -398,6 +433,12 @@ def api_hotspots():
 
     cell_size = int(request.args.get('cell_size', 300))
     cell_size = max(100, min(1000, cell_size))
+
+    # Metric to analyze: count, severity_score, or hmotna_skoda
+    metric = request.args.get('metric', 'count')
+    if metric not in ['count', 'severity_score', 'hmotna_skoda']:
+        metric = 'count'
+
     filters = get_filters_from_request()
 
     # Filter data
@@ -414,9 +455,9 @@ def api_hotspots():
     day_grid = aggregate_to_grid(day_gdf, grid.copy(), data['bounds'], cell_size)
     night_grid = aggregate_to_grid(night_gdf, grid.copy(), data['bounds'], cell_size)
 
-    # Compute Getis-Ord Gi*
-    day_grid = compute_getis_ord(day_grid, 'count')
-    night_grid = compute_getis_ord(night_grid, 'count')
+    # Compute Getis-Ord Gi* on selected metric
+    day_grid = compute_getis_ord(day_grid, metric)
+    night_grid = compute_getis_ord(night_grid, metric)
 
     # Extract significant hotspots (z > 0 means hot spot, z < 0 means cold spot)
     def extract_hotspots(grid_result, period):
@@ -427,16 +468,20 @@ def api_hotspots():
                 'lat': float(row['center_lat']),
                 'lon': float(row['center_lon']),
                 'count': int(row['count']),
+                'metric_value': int(row[metric]),  # The analyzed metric value
                 'z_score': round(float(row['z_score']), 2),
                 'p_value': round(float(row['p_value']), 4),
                 'fatalities': int(row['usmrceno']),
                 'serious': int(row['tezce_zraneno']),
                 'minor': int(row['lehce_zraneno']),
                 'damage': int(row['hmotna_skoda']),
+                'severity_score': int(row['severity_score']),
                 'cause': row['dominant_cause'],
                 'period': period
             })
-        return sorted(hotspots, key=lambda x: x['z_score'], reverse=True)
+        # Sort by metric value for severity/damage, by z-score for count
+        sort_key = 'metric_value' if metric != 'count' else 'z_score'
+        return sorted(hotspots, key=lambda x: x[sort_key], reverse=True)
 
     day_hotspots = extract_hotspots(day_grid, 'Day')
     night_hotspots = extract_hotspots(night_grid, 'Night')
@@ -446,6 +491,7 @@ def api_hotspots():
 
     return jsonify({
         'cell_size': cell_size,
+        'metric': metric,
         'day_hotspots': day_hotspots,
         'night_hotspots': night_hotspots,
         'day_hotspot_count': len(day_hotspots),
