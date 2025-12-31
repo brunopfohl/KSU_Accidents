@@ -14,25 +14,25 @@ Konkrétně se práce zaměří na detekci:
 V odborné literatuře se pro identifikaci rizikových míst v dopravě nejčastěji porovnávají metody shlukové analýzy (Unsupervised Machine Learning) a metody prostorové statistiky.
 
 ### A) K-Means (Centroid-based clustering)
-Základní shlukovací metoda K-Means je často využívána pro svou rychlost a jednoduchost. Anderson (2009) ve své studii aplikovala K-Means pro klasifikaci nehodových hotspotů v Londýně. Ačkoliv metoda dokázala rozdělit data do skupin podle atributů, pro prostorovou identifikaci na silniční síti má zásadní nevýhody:
+Základní shlukovací metoda K-Means je často využívána pro svou rychlost a jednoduchost. Nedávná studie Wahyono et al. (2024) aplikovala K-Means pro identifikaci rizikových oblastí ve městě Depok. Ačkoliv metoda dokázala klasifikovat městské čtvrti do rizikových skupin, pro detailní identifikaci na silniční síti má zásadní nevýhody:
 *   Předpokládá sférické (kruhové) tvary shluků, což neodpovídá lineárnímu charakteru silnic.
 *   Je citlivá na odlehlé hodnoty (outliers) a vyžaduje předem známý počet shluků ($k$), který je u dopravních dat v neznámém prostředí obtížné určit.
 
 ### B) DBSCAN (Density-based clustering)
-Jako vhodnější alternativa se v literatuře (např. Kumar et al., 2017; Ester et al., 1996) uvádí algoritmus DBSCAN. Tato metoda je pro dopravní analýzu preferována z několika důvodů:
-*   **Libovolné tvary:** Dokáže identifikovat shluky, které kopírují tvar silnic, křižovatek a zatáček (neomezuje se na kruhy).
-*   **Práce se šumem:** Automaticky identifikuje a vylučuje ojedinělé nehody (šum), které netvoří skutečný hotspot.
-Studie potvrzují, že DBSCAN dosahuje přesnějších výsledků při identifikaci "černých míst" (black spots) než metody založené na mřížce nebo K-Means.
+Jako vhodnější alternativa se v literatuře uvádí algoritmus DBSCAN (Ester et al., 1996). AlHashmi (2024) ve své disertační práci využil DBSCAN k úspěšné identifikaci nehodových hotspotů na rozsáhlém datasetu, přičemž ocenil schopnost metody pracovat se šumem. Kamh et al. (2024) však ve svém srovnání upozorňují, že ačkoliv je DBSCAN lepší než K-Means, v oblastech s proměnlivou hustotou sítě může být překonán hierarchickými metodami. Přesto zůstává preferovanou metodou pro:
+*   **Libovolné tvary:** Dokáže identifikovat shluky kopírující tvar silnic (zatáčky).
+*   **Práce se šumem:** Automaticky vylučuje ojedinělé nehody.
 
 ### C) Getis-Ord Gi* (Prostorová statistika)
-Třetím klíčovým přístupem je statistická analýza hot spotů pomocí statistiky Getis-Ord Gi* (Ord & Getis, 1995). Na rozdíl od prostého shlukování (kde shluk je jen "hodně bodů u sebe") tato metoda testuje **statistickou významnost** (statistical significance).
-*   Zohledňuje prostorovou autokorelaci a dokáže pomocí p-hodnoty (p-value) určit, zda je koncentrace nehod v daném místě statisticky významná, nebo zda jde o náhodný jev.
-*   Umožňuje rozlišit "Hot Spots" (shluky vysokých hodnot) a "Cold Spots" (shluky nízkých hodnot).
+Třetím klíčovým přístupem je statistická analýza hot spotů pomocí statistiky Getis-Ord Gi*. Alkhatni et al. (2023) demonstrovali použití této metody v kombinaci s KDE pro identifikaci zón, kde se nehody shlukují se statistickou významností. Na rozdíl od prostého shlukování tato metoda:
+*   Zohledňuje prostorovou autokorelaci a dokáže určit p-hodnotu (p-value).
+*   Rozlišuje "Hot Spots" (shluky vysokých hodnot) a "Cold Spots" (shluky nízkých hodnot), což je klíčové pro validaci výsledků.
 
 ## 3. Navržené řešení
-Na základě rešerše bude v práci zvolen **hybridní přístup**:
-1.  Metoda **DBSCAN** bude využita pro prvotní exploraci a definici tvaru rizikových úseků, jelikož nejlépe reflektuje topologii silniční sítě v Liberci.
-2.  Pro ověření hypotézy o časových anomáliích (den vs. noc) bude aplikován **statistický přístup** (inspirovaný logikou Getis-Ord), který nebude porovnávat pouze absolutní počty nehod, ale testovat statistickou významnost odchylky poměru nočních nehod od očekávaného průměru.
+Na základě rešerše bude v práci zvolen **hybridní přístup**, který kombinuje silné stránky výše uvedených metod:
+
+1.  **DBSCAN (Segmentace):** Bude využit pro prvotní **prostorovou segmentaci**. Jeho úkolem bude definovat konkrétní shluky nehod (např. křižovatky, úseky), jelikož lépe než mřížkové metody reflektuje nepravidelné tvary silniční sítě.
+2.  **Getis-Ord Gi* (Validace a Anomálie):** Pro ověření **statistické významnosti** a zejména pro detekci **časových anomálií** bude aplikována metoda Getis-Ord Gi* přímo na atribut relativní četnosti nočních nehod (tzv. night ratio). Tento postup umožní identifikovat prostorové shluky, kde je podíl nočních nehod statisticky významně vyšší než v okolí (resp. než je očekávaná hodnota).
 
 ## 4. Potřebná data
 K řešení problému budou využita otevřená data Policie ČR, která jsou dostupná pro celou Českou republiku.
@@ -44,7 +44,8 @@ K řešení problému budou využita otevřená data Policie ČR, která jsou do
     *   Příčina a následky (hmotná škoda, zranění) – pro případné váhování závažnosti nehod.
 
 ## 5. Citace použitých zdrojů
-1.  **Anderson, T. K. (2009).** Kernel density estimation and K-means clustering to profile road accident hotspots. *Accident Analysis & Prevention*, 41(3), 359-364.
-2.  **Ester, M., Kriegel, H. P., Sander, J., & Xu, X. (1996).** A density-based algorithm for discovering clusters in large spatial databases with noise. *KDD-96 Proceedings*.
-3.  **Kumar, S., et al. (2017).** Black spot identification using cluster analysis. *International Journal of Civil Engineering and Technology*, 8(4).
-4.  **Ord, J. K., & Getis, A. (1995).** Local Spatial Autocorrelation Statistics: Distributional Issues and an Application. *Geographical Analysis*, 27(4).
+1.  **AlHashmi, M. Y. S. (2024).** Using Machine Learning for Road Accident Severity Prediction and Optimal Rescue Pathways. *RIT Theses*.
+2.  **Alkhatni, F., et al. (2023).** Hotspots based on the crash frequency by Getis-Ord Gi* and network KDE Methods. *ResearchGate*.
+3.  **Ester, M., et al. (1996).** A Density-Based Algorithm for Discovering Clusters in Large Spatial Databases with Noise. *KDD-96 Proceedings*.
+4.  **Kamh, H., et al. (2024).** Exploring Road Traffic Accidents Hotspots Using Clustering Algorithms and GIS-Based Spatial Analysis. *ResearchGate*.
+5.  **Wahyono, H., et al. (2024).** K-Means Clustering for Identifying Traffic Accident Hotspots in Depok City. *ResearchGate*.

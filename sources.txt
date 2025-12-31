@@ -1,0 +1,8 @@
+https://www.researchgate.net/publication/391666083_K-Means_Clustering_for_Identifying_Traffic_Accident_Hotspots_in_Depok_City
+https://www.researchgate.net/publication/383141692_Exploring_Road_Traffic_Accidents_Hotspots_Using_Clustering_Algorithms_and_GIS-based_Spatial_Analysis
+https://repository.rit.edu/cgi/viewcontent.cgi?params=/context/theses/article/13119/&path_info=MAlHashmiThesis12_2024.pdf
+https://cocoa.ethz.ch/downloads/2019/10/2513_The%20Costs%20of%20Traffic%20Accident%20Hotspots%20v2.pdf
+https://pro.arcgis.com/en/pro-app/latest/tool-reference/spatial-statistics/h-how-hot-spot-analysis-getis-ord-gi-spatial-stati.htm
+https://www.researchgate.net/figure/Hotspots-based-on-the-crash-frequency-by-Getis-Ord-Gi-and-network-KDE-Methods_fig4_367620638
+https://www.sciencedirect.com/science/article/abs/pii/S0001457508002340
+https://file.biolab.si/papers/1996-DBSCAN-KDD.pdf
